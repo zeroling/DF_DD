@@ -1,0 +1,100 @@
+# ============================================================================
+# evaluate 阶段配置：只在合成集训练全新分类器，最后在真实测试集报告指标。
+# ============================================================================
+
+# evaluation 的分类器与在线 IDM 队列完全独立，所有重复实验都重新随机初始化。
+evaluation:
+  # null 表示评估 condensed/ipc_N/synthetic.pt 最终结果；
+  # 设置为 1000/2000/... 时评估对应 snapshots/iteration_XXXXXX/synthetic.pt。
+  snapshot_iteration: null
+  # architectures 是用于检验跨架构泛化的分类网络列表。
+  architectures: [convnet, resnet18, convnext_tiny, vit_tiny]
+  # repeats 是每个来源、IPC、架构使用不同随机种子重复训练的次数。
+  repeats: 3
+  # batch_size 是合成训练集和真实验证集评估的 batch size。
+  batch_size: 64
+  # steps_per_epoch 是有放回采样合成集时每个 epoch 的优化步数。
+  steps_per_epoch: 20
+  # label_smoothing 是合成数据分类训练的标签平滑系数。
+  label_smoothing: 0.0
+  # checkpoint_interval_epochs 控制每隔多少 epoch 保存 checkpoint_last.pt。
+  checkpoint_interval_epochs: 1
+  # validation_interval_epochs 控制每隔多少 epoch 在真实 val 上检查一次。
+  validation_interval_epochs: 1
+  # log_interval_epochs 控制训练日志输出频率。
+  log_interval_epochs: 1
+  # sources 只评估主流程 condense 生成的合成集。
+  sources: [condensed]
+
+  # epochs 是不同 IPC 的最大分类训练轮数。
+  epochs:
+    # IPC=1 数据最少，因此使用更多有放回训练轮次。
+    "1": 300
+    # IPC=10 的最大训练轮次。
+    "10": 200
+    # IPC=50 的最大训练轮次。
+    "50": 100
+
+  # optimization 为四种评估架构提供独立优化器尺度。
+  optimization:
+    # ConvNet 评估训练策略。
+    convnet:
+      # optimizer 可选 sgd、adam 或 adamw。
+      optimizer: adamw
+      # 初始学习率。
+      learning_rate: 0.001
+      # 余弦退火最低学习率。
+      min_learning_rate: 0.000001
+      # 权重衰减。
+      weight_decay: 0.0001
+    # ResNet-18 评估训练策略。
+    resnet18:
+      # ResNet 默认使用 SGD。
+      optimizer: sgd
+      # 初始学习率。
+      learning_rate: 0.01
+      # 余弦退火最低学习率。
+      min_learning_rate: 0.00001
+      # 权重衰减。
+      weight_decay: 0.0005
+      # SGD 动量。
+      momentum: 0.9
+      # 是否使用 Nesterov 动量。
+      nesterov: true
+    # ConvNeXt-Tiny 评估训练策略。
+    convnext_tiny:
+      # ConvNeXt 默认使用 AdamW。
+      optimizer: adamw
+      # 初始学习率。
+      learning_rate: 0.0005
+      # 余弦退火最低学习率。
+      min_learning_rate: 0.000001
+      # 权重衰减。
+      weight_decay: 0.05
+    # ViT-Tiny 评估训练策略。
+    vit_tiny:
+      # ViT 默认使用 AdamW。
+      optimizer: adamw
+      # 初始学习率。
+      learning_rate: 0.0005
+      # 余弦退火最低学习率。
+      min_learning_rate: 0.000001
+      # 权重衰减。
+      weight_decay: 0.05
+
+  # early_stopping 使用真实验证集 Balanced Accuracy 选择最佳分类器，不查看 test。
+  early_stopping:
+    # enabled=true 会启用验证早停并最终加载最佳验证权重测试。
+    enabled: true
+    # monitor 固定为 balanced_accuracy，对类别不平衡医学数据更稳健。
+    monitor: balanced_accuracy
+    # mode=max 表示指标升高才算改善。
+    mode: max
+    # patience_checks 是连续多少次验证无改善后停止。
+    patience_checks: 20
+    # min_delta 是 Balanced Accuracy 至少提高多少才算改善。
+    min_delta: 0.001
+    # minimum_epochs 保证至少训练这些 epoch。
+    minimum_epochs: 30
+    # reset_on_resume 控制续训时是否清空已有早停历史。
+    reset_on_resume: false

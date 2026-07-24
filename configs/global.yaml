@@ -1,0 +1,234 @@
+# ============================================================================
+# 项目全局配置：只管理所有阶段共同使用的环境、数据、网络结构与执行顺序。
+# ============================================================================
+
+# stage_configs 告诉配置加载器各阶段参数文件的位置；相对路径以本文件目录为基准。
+stage_configs:
+  # AutoencoderKL 的网络、损失、优化器、保存频率和早停参数文件。
+  train_autoencoder: autoencoder.yaml
+  # 隐空间条件扩散模型的网络、噪声调度、优化器、保存频率和早停参数文件。
+  train_diffusion: diffusion.yaml
+  # 同构 IDM 动态模型池与扩散隐变量蒸馏的全部参数文件。
+  condense: condensation.yaml
+  # 用合成集训练全新分类器并在真实测试集评估的参数文件。
+  evaluate: evaluation.yaml
+
+# project 保存与具体算法阶段无关的运行环境参数。
+project:
+  # seed 是数据划分、模型初始化、队列替换和采样器共同使用的基础随机种子。
+  seed: 2026
+  # deterministic=true 优先保证复现；若更看重速度，可设为 false。
+  deterministic: false
+  # device=auto 时优先使用 CUDA；也可以显式写 cpu、cuda、cuda:0 等。
+  device: auto
+  # run_dir 是所有断点、日志、预览图和最终合成集的统一输出根目录。
+  run_dir: outputs/online_idm_latent_diffusion_tanh_v2
+  # num_workers 是 Linux 下每个 DataLoader 的并行读取进程数。
+  num_workers: 8
+  # Windows 用 spawn 启动进程且会重复导入大型依赖；0 是最稳妥的默认值。
+  # 内存充足时可逐步增到 1、2、4。
+  windows_num_workers: 0
+  # 每个 worker 提前准备的 batch 数，用于隐藏解码、resize 和随机增强开销。
+  prefetch_factor: 2
+  # pin_memory=true 会在 CUDA 训练时使用锁页内存以加快 CPU 到 GPU 的传输。
+  pin_memory: true
+  # persistent_workers=true 会复用数据进程，避免每个 epoch 重复创建进程。
+  persistent_workers: true
+  # amp=true 会在 CUDA 上启用自动混合精度；CPU 环境会自动关闭。
+  amp: true
+  # amp_dtype 可选 bf16 或 fp16；支持 bf16 的新显卡通常优先选择 bf16。
+  amp_dtype: bf16
+  # matmul_precision 控制 float32 矩阵乘法精度，可选 highest、high、medium。
+  matmul_precision: high
+
+# data 描述数据来源、图像预处理、增强和 DataLoader 的共享规则。
+data:
+  # adapter=folder 读取 root/split/class/image；adapter=manifest 读取清单文件。
+  adapter: folder
+  # root 是数据集根目录；相对路径始终相对于项目根目录解析。
+  root: data/COVID
+  # train_split 是真实训练集子目录名，只能用于训练生成器和在线队列。
+  train_split: train
+  # val_split 是真实验证集子目录名，用于早停与超参数选择，不参与最终测试。
+  val_split: val
+  # test_split 是真实测试集子目录名，只在 evaluate 的最终一次评估中使用。
+  test_split: test
+  # class_names=null 时按训练目录字典序发现类别；显式列表可固定跨机器标签顺序。
+  class_names:
+    # 类别 0 的名称。
+    - COVID
+    # 类别 1 的名称。
+    - Lung_Opacity
+    # 类别 2 的名称。
+    - Normal
+    # 类别 3 的名称。
+    - Viral Pneumonia
+
+  # image 保存所有数据集都可以调整的图像形状与强度规则。
+  image:
+    # size 是最终输入的 [高度, 宽度]；改变后要保证能被 VAE 倍率和 ViT patch 整除。
+    size: [224, 224]
+    # channels 当前支持 1 或 3；灰度图设为 1，RGB 或复制灰度通道设为 3。
+    channels: 3
+    # intensity_mode=auto 会按文件类型归一化；也可选 preserve 或 minmax。
+    intensity_mode: auto
+    # percentile_range 用于 DICOM/浮点医学数组的稳健逐图 min-max 截断。
+    percentile_range: [0.5, 99.5]
+
+  # classifier_normalization 只作用于分类器，不改变 Autoencoder/扩散输入范围。
+  classifier_normalization:
+    # mean 的长度必须等于 channels；0.5 会把 [0,1] 的中心移动到 0。
+    mean: [0.5, 0.5, 0.5]
+    # std 的长度必须等于 channels；0.5 会把输入近似缩放到 [-1,1]。
+    std: [0.5, 0.5, 0.5]
+
+  # validation 控制没有独立 val 目录时从 train 中划分验证集的规则。
+  validation:
+    # ratio 是每类划入验证集的比例，必须位于 0 与 1 之间。
+    ratio: 0.10
+    # seed 单独控制数据划分，避免改变模型 seed 后验证集也发生变化。
+    seed: 2026
+
+  # augmentation 是真实分类训练、在线队列和合成集分类训练共享的可微增强配置。
+  augmentation:
+    # enabled=false 会关闭下列全部增强，但仍保留尺寸和强度预处理。
+    enabled: true
+    # horizontal_flip_probability 是水平翻转概率；方向敏感数据可设为 0。
+    horizontal_flip_probability: 0.5
+    # rotation_degrees 是随机旋转的最大绝对角度。
+    rotation_degrees: 7.0
+    # translate_ratio 是相对图像高宽的最大平移比例。
+    translate_ratio: 0.04
+    # scale_range 是随机缩放因子的 [最小值, 最大值]。
+    scale_range: [0.95, 1.05]
+    # brightness 是亮度扰动的最大幅度；0 表示不改变亮度。
+    brightness: 0.08
+    # contrast 是对比度扰动的最大幅度；0 表示不改变对比度。
+    contrast: 0.10
+
+  # loader 提供各阶段未单独覆盖时使用的默认批大小与尾批处理方式。
+  loader:
+    # train_batch_size 是普通真实数据训练阶段的默认 batch size。
+    train_batch_size: 64
+    # eval_batch_size 是真实验证集和测试集推理时的默认 batch size。
+    eval_batch_size: 128
+    # drop_last=false 保留最后一个不足 batch 的样本，避免小数据集被意外丢空。
+    drop_last: false
+
+  # manifest 仅在 adapter=manifest 时生效；支持 CSV、JSON 或 JSONL 清单。
+  manifest:
+    # train 是训练清单路径；null 表示从统一清单的 split 列筛选。
+    train: null
+    # val 是验证清单路径；null 表示从统一清单的 split 列筛选或自动划分。
+    val: null
+    # test 是测试清单路径；null 表示从统一清单的 split 列筛选。
+    test: null
+    # path_column 是清单中保存图像路径的字段名。
+    path_column: path
+    # label_column 是清单中保存类别名或整数标签的字段名。
+    label_column: label
+    # split_column 是统一清单中区分 train、val、test 的字段名。
+    split_column: split
+
+# models 保存 IDM 可选同构架构和下游评估阶段共用的分类网络结构。
+models:
+  # pretrained 必须保持 false；本项目所有分类网络都从随机初始化开始。
+  pretrained: false
+  # definitions 允许逐层调整四种网络的宽度、深度、卷积核和正则化参数。
+  definitions:
+    # convnet 默认是官方 ImageNet IDM 风格的六块 GroupNorm ConvNet。
+    convnet:
+      # widths 给出每个卷积块的输出通道数，因此列表长度同时决定网络深度。
+      widths: [128, 128, 128, 128, 128, 128]
+      # kernel_size 是所有卷积块的卷积核边长，必须为正奇数。
+      kernel_size: 3
+      # group_norm_groups 是 GroupNorm 期望组数；代码会自动取可整除通道的最大因子。
+      group_norm_groups: 8
+      # activation 可选 gelu、relu、silu，用来控制每个卷积块的激活函数。
+      activation: gelu
+      # pool_kernel_size 是每个块末尾平均池化的核与步长；1 表示不降采样。
+      pool_kernel_size: 2
+      # feature_indices 指定浅层、中层、深层特征来自第几个块，索引从 0 开始。
+      feature_indices: {shallow: 0, middle: 2, deep: 5}
+
+    # resnet18 是可调通道和块数的 ResNet；默认参数与标准 ResNet-18 一致。
+    resnet18:
+      # stage_widths 分别指定四个残差阶段的输出通道数。
+      stage_widths: [64, 128, 256, 512]
+      # stage_blocks 分别指定四个残差阶段的 BasicBlock 数量；[2,2,2,2] 即 ResNet-18。
+      stage_blocks: [2, 2, 2, 2]
+      # stem_width 是进入第一个残差阶段前的卷积输出通道数。
+      stem_width: 64
+      # stem_kernel_size 是首层卷积核大小；小图像可改成 3。
+      stem_kernel_size: 7
+      # stem_stride 是首层卷积步长；小图像可改成 1。
+      stem_stride: 2
+      # use_max_pool 控制 stem 后是否使用 3×3 最大池化。
+      use_max_pool: true
+      # normalization 可选 batch 或 group；极小真实 batch 建议使用 group。
+      normalization: batch
+      # group_norm_groups 仅在 normalization=group 时生效。
+      group_norm_groups: 32
+      # zero_init_residual=true 会把每个残差块末端归一化权重初始化为 0。
+      zero_init_residual: false
+
+    # convnext_tiny 默认构造可调的 ConvNeXt-Tiny，而不是下载 timm 预训练权重。
+    convnext_tiny:
+      # custom=true 使用下列 depths/dims 自建网络；false 时使用 model_name 的固定结构。
+      custom: true
+      # model_name 仅在 custom=false 时使用。
+      model_name: convnext_tiny
+      # depths 是四个 ConvNeXt stage 的块数。
+      depths: [3, 3, 9, 3]
+      # dims 是四个 ConvNeXt stage 的通道数。
+      dims: [96, 192, 384, 768]
+      # kernel_sizes 是深度卷积核大小，可写单个整数或四项列表。
+      kernel_sizes: 7
+      # patch_size 是 stem 的 patchify 卷积核与步长。
+      patch_size: 4
+      # drop_rate 是分类头前的随机失活概率。
+      drop_rate: 0.0
+      # drop_path_rate 是从浅到深线性增加的随机深度最大概率。
+      drop_path_rate: 0.10
+      # layer_scale_init_value 是每个 ConvNeXt block 的 LayerScale 初始值。
+      layer_scale_init_value: 0.000001
+
+    # vit_tiny 默认构造可调 ViT-Tiny，并把不同深度 token 恢复为空间网格。
+    vit_tiny:
+      # custom=true 使用下列 ViT 超参数自建网络；false 时使用 model_name 固定结构。
+      custom: true
+      # model_name 仅在 custom=false 时使用。
+      model_name: vit_tiny_patch16_224
+      # patch_size 是输入图像切分 patch 的边长，必须整除图像高宽。
+      patch_size: 16
+      # embed_dim 是每个 patch token 的通道维度。
+      embed_dim: 192
+      # depth 是 Transformer block 总数。
+      depth: 12
+      # num_heads 是每个注意力层的多头数量，必须整除 embed_dim。
+      num_heads: 3
+      # mlp_ratio 是 MLP 隐藏维度相对 embed_dim 的倍率。
+      mlp_ratio: 4.0
+      # qkv_bias 控制 Query、Key、Value 投影是否使用偏置。
+      qkv_bias: true
+      # drop_rate 是分类头和部分投影层的随机失活概率。
+      drop_rate: 0.0
+      # attention_drop_rate 是注意力权重的随机失活概率。
+      attention_drop_rate: 0.0
+      # drop_path_rate 是 Transformer block 的随机深度最大概率。
+      drop_path_rate: 0.10
+      # feature_indices 指定用于浅、中、深 RBF 拓扑的 Transformer block 索引。
+      feature_indices: {shallow: 2, middle: 5, deep: 11}
+
+# pipeline 只控制默认运行哪些阶段；命令行 --stage 仍可单独运行任意阶段。
+pipeline:
+  # enabled_stages 是完整主流程顺序；静态 train_experts 已从主流程彻底移除。
+  enabled_stages:
+    # 第一阶段：从零训练医学图像 AutoencoderKL。
+    - train_autoencoder
+    # 第二阶段：在冻结 VAE 的隐空间从零训练类别条件扩散模型。
+    - train_diffusion
+    # 第三阶段：在线训练同构 IDM 动态模型池并优化扩散初始隐变量。
+    - condense
+    # 第四阶段：只用合成数据训练新分类器并在真实测试集评估。
+    - evaluate
