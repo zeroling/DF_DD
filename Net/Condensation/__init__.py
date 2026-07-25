@@ -1,13 +1,17 @@
-"""IDM 分布匹配、分层 RBF 拓扑与同构动态模型池。"""
+"""标准 IDM、生成参数化和分层 RBF topology 组件。"""
 
-from Net.Condensation.losses import classwise_losses, weighted_total
-from Net.Condensation.idm_queue import IDMModelQueue
+from Net.Condensation.idm_official import (
+    IDMConvNet6,
+    build_idm_convnet6,
+    diff_augment,
+    partition_and_expand,
+)
 from Net.Condensation.topology import topology_loss
 
-# __all__ 只导出稳定公共接口，内部辅助函数仍从具体模块访问。
 __all__ = [
-    "classwise_losses",
-    "weighted_total",
+    "IDMConvNet6",
+    "build_idm_convnet6",
+    "diff_augment",
+    "partition_and_expand",
     "topology_loss",
-    "IDMModelQueue",
 ]

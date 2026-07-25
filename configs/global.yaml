@@ -8,10 +8,14 @@ stage_configs:
   train_autoencoder: autoencoder.yaml
   # 隐空间条件扩散模型的网络、噪声调度、优化器、保存频率和早停参数文件。
   train_diffusion: diffusion.yaml
-  # 同构 IDM 动态模型池与扩散隐变量蒸馏的全部参数文件。
-  condense: condensation.yaml
+  # 标准 IDM 与 topology / VAE / diffusion 消融算法参数。
+  condense: condense.yaml
   # 用合成集训练全新分类器并在真实测试集评估的参数文件。
   evaluate: evaluation.yaml
+
+# 消融实验矩阵单独维护；算法参数仍归 condense 阶段管理。
+experiment_configs:
+  ablation: ablation.yaml
 
 # project 保存与具体算法阶段无关的运行环境参数。
 project:
@@ -228,7 +232,7 @@ pipeline:
     - train_autoencoder
     # 第二阶段：在冻结 VAE 的隐空间从零训练类别条件扩散模型。
     - train_diffusion
-    # 第三阶段：在线训练同构 IDM 动态模型池并优化扩散初始隐变量。
+    # 第三阶段：运行标准 IDM 或 condense.yaml 指定的消融方法。
     - condense
     # 第四阶段：只用合成数据训练新分类器并在真实测试集评估。
     - evaluate

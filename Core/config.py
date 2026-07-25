@@ -206,61 +206,13 @@ def _validate_early_stopping(settings: Mapping[str, Any], prefix: str) -> None:
         raise ValueError(f"{prefix}.min_delta 不能为负数")
 
 
-def _validate_idm_queue(settings: Mapping[str, Any], prefix: str) -> None:
-    """校验原始 IDM 风格的同构动态模型池。"""
-
-    # 单次实验只能选择一种架构，但可以在四种已实现网络之间切换。
-    architecture = str(settings.get("architecture", "")).lower()
-    if architecture not in SUPPORTED_CLASSIFIERS:
-        raise ValueError(
-            f"{prefix}.architecture 必须是 {sorted(SUPPORTED_CLASSIFIERS)} 之一"
-        )
-    initial = int(settings.get("initial_size", 0))
-    maximum_setting = settings.get("maximum_size", 0)
-    maximum = int(
-        maximum_setting.get(architecture, 0)
-        if isinstance(maximum_setting, Mapping)
-        else maximum_setting
-    )
-    if initial <= 0:
-        raise ValueError(f"{prefix}.initial_size 必须大于 0")
-    if maximum < initial:
-        raise ValueError(f"{prefix}.maximum_size 必须不小于 initial_size")
-    # 每轮只抽少量模型，不等于模型池总规模。
-    for key in ("models_per_iteration", "train_steps_per_model", "generate_interval_iterations"):
-        if int(settings.get(key, 0)) <= 0:
-            raise ValueError(f"{prefix}.{key} 必须大于 0")
-    batch_setting = settings.get("batch_size", 0)
-    batch_size = int(
-        batch_setting.get(architecture, 0)
-        if isinstance(batch_setting, Mapping)
-        else batch_setting
-    )
-    if batch_size <= 0:
-        raise ValueError(f"{prefix}.batch_size.{architecture} 必须大于 0")
-    if int(settings["models_per_iteration"]) > maximum:
-        raise ValueError(f"{prefix}.models_per_iteration 不能超过 maximum_size")
-    ema_decay = float(settings.get("accuracy_ema_decay", 0.9))
-    if not 0.0 <= ema_decay < 1.0:
-        raise ValueError(f"{prefix}.accuracy_ema_decay 必须位于 [0,1)")
-    reliability = float(settings.get("minimum_reliability", 0.05))
-    if not 0.0 <= reliability <= 1.0:
-        raise ValueError(f"{prefix}.minimum_reliability 必须位于 [0,1]")
-    optimization = settings.get("optimization", {}).get(architecture, {})
-    if str(optimization.get("optimizer", "sgd")).lower() not in {"sgd", "adam", "adamw"}:
-        raise ValueError(f"{prefix}.optimization.{architecture}.optimizer 不受支持")
-    if float(optimization.get("learning_rate", 0.0)) <= 0:
-        raise ValueError(
-            f"{prefix}.optimization.{architecture}.learning_rate 必须大于 0"
-        )
-
-
 def _validate(config: Mapping[str, Any]) -> None:
     """对跨文件合并后的完整配置执行集中、可读的启动前校验。"""
 
     # 这些节点分别来自全局文件和四个阶段文件，缺失通常表示 stage_configs 路径写错。
     required = {
         "stage_configs",
+        "experiment_configs",
         "project",
         "data",
         "models",
@@ -269,6 +221,7 @@ def _validate(config: Mapping[str, Any]) -> None:
         "condensation",
         "evaluation",
         "pipeline",
+        "ablation",
     }
     # 先报告所有缺失节点，避免用户逐次修复一个。
     missing = sorted(required.difference(config))
@@ -392,69 +345,46 @@ def _validate(config: Mapping[str, Any]) -> None:
     _require_positive(diffusion, ("epochs", "batch_size", "train_timesteps"), "diffusion")
     _validate_early_stopping(diffusion.get("early_stopping", {}), "diffusion.early_stopping")
 
-    # 主方法固定研究 IPC 1、10、50；每一档必须提供迭代、采样和损失配置。
+    # condense 已替换为标准 IDM IPC=1；扩展方法只改变图像参数化和 topology。
     condensation = config["condensation"]
-    if int(condensation.get("preview_interval_iterations", 0)) < 0:
-        raise ValueError("condensation.preview_interval_iterations 不能为负数")
-    if int(condensation.get("snapshot_interval_iterations", 0)) < 0:
-        raise ValueError("condensation.snapshot_interval_iterations 不能为负数")
-    if int(condensation.get("preview_batch_size", 0)) <= 0:
-        raise ValueError("condensation.preview_batch_size 必须大于 0")
-    if int(
-        condensation.get(
-            "export_batch_size",
-            condensation.get("preview_batch_size", 0),
-        )
-    ) <= 0:
-        raise ValueError("condensation.export_batch_size 必须大于 0")
     requested_ipcs = [int(value) for value in condensation.get("ipc_values", [])]
-    if sorted(set(requested_ipcs)) != [1, 10, 50]:
-        raise ValueError("condensation.ipc_values 必须为 [1, 10, 50]")
-    for ipc in requested_ipcs:
-        key = str(ipc)
-        for field in ("synthetic_per_class_per_step", "iterations", "ddim_steps", "guidance_scale", "loss_profiles"):
-            if key not in condensation.get(field, {}):
-                raise KeyError(f"condensation.{field} 缺少 IPC={ipc} 的配置")
-        if int(condensation["iterations"][key]) <= 0:
-            raise ValueError(f"condensation.iterations.{key} 必须大于 0")
-        if not 0 < int(condensation["synthetic_per_class_per_step"][key]) <= ipc:
-            raise ValueError(
-                f"condensation.synthetic_per_class_per_step.{key} 必须位于 [1,{ipc}]"
-            )
-        if int(condensation["ddim_steps"][key]) <= 0:
-            raise ValueError(f"condensation.ddim_steps.{key} 必须大于 0")
-        if int(condensation["ddim_steps"][key]) > int(diffusion["train_timesteps"]):
-            raise ValueError(f"condensation.ddim_steps.{key} 不能超过扩散训练时间步")
-    # 主流程恢复原始 IDM：一次选择一个同构架构，大量随机初始化动态模型。
-    _validate_idm_queue(
-        condensation.get("idm_queue", {}),
-        "condensation.idm_queue",
+    if requested_ipcs != [1] or int(condensation.get("idm", {}).get("ipc", 0)) != 1:
+        raise ValueError("标准 IDM 消融入口固定为 IPC=1")
+    idm = condensation.get("idm", {})
+    _require_positive(
+        idm,
+        (
+            "iterations",
+            "image_learning_rate",
+            "batch_real",
+            "batch_train",
+            "net_num",
+            "fetch_net_num",
+        ),
+        "condensation.idm",
     )
-    queue_architecture = str(
-        condensation.get("idm_queue", {}).get("architecture", "")
-    ).lower()
-    real_per_class_setting = condensation.get("real_per_class", 0)
-    real_per_class = int(
-        real_per_class_setting.get(queue_architecture, 0)
-        if isinstance(real_per_class_setting, Mapping)
-        else real_per_class_setting
+    if int(idm.get("partition_expansion", 0)) != 2:
+        raise ValueError("condensation.idm.partition_expansion 必须为 2")
+    reserved_fraction = float(
+        condensation.get("memory", {}).get("max_reserved_fraction", 0)
     )
-    if real_per_class <= 0:
+    if not 0.25 <= reserved_fraction <= 0.95:
         raise ValueError(
-            f"condensation.real_per_class.{queue_architecture} 必须大于 0"
+            "condensation.memory.max_reserved_fraction 必须在 0.25–0.85"
         )
-    # 通用拓扑只接受三层正整数网格和真实距离中位数带宽。
+    # 通用 topology 接受三层正整数网格和 JS/KL/MSE 散度。
     topology = condensation.get("topology", {})
-    if str(topology.get("bandwidth", "real_median")).lower() != "real_median":
-        raise ValueError("condensation.topology.bandwidth 当前只支持 real_median")
-    # 亲和矩阵比较可选择概率散度 JS/KL，或作为消融使用逐边 MSE。
     if str(topology.get("divergence", "js")).lower() not in {"js", "kl", "mse"}:
         raise ValueError("condensation.topology.divergence 只能是 js、kl 或 mse")
     for level in ("shallow", "middle", "deep"):
         grid = topology.get("grids", {}).get(level)
         if not isinstance(grid, (list, tuple)) or len(grid) != 2 or min(map(int, grid)) <= 0:
             raise ValueError(f"condensation.topology.grids.{level} 必须是正整数 [高度,宽度]")
-    _validate_early_stopping(condensation.get("early_stopping", {}), "condensation.early_stopping")
+    methods = config["ablation"].get("methods", {})
+    if set(map(str, methods)) != {"C0", "C1", "C2", "C3", "C4", "C5"}:
+        raise ValueError("ablation.methods 必须完整包含 C0–C5")
+    if str(condensation.get("default_method", "C0")) not in methods:
+        raise ValueError("condensation.default_method 必须存在于 ablation.methods")
 
     # 评估必须至少有一个合法架构和一次重复，并且只读取主方法 condensed 产物。
     evaluation = config["evaluation"]
@@ -520,6 +450,19 @@ def load_config(
         merged = _deep_merge(merged, _read_yaml(stage_path))
         # 保存解析后的绝对路径供日志和 README 排查。
         config_paths[str(stage_name)] = str(stage_path)
+    # 实验矩阵与阶段算法配置分开维护，但仍由同一个入口原子地解析。
+    experiment_files = global_config.get("experiment_configs", {})
+    if not isinstance(experiment_files, Mapping) or set(map(str, experiment_files)) != {
+        "ablation"
+    }:
+        raise ValueError("experiment_configs 必须且只能包含 ablation")
+    for experiment_name, configured_path in experiment_files.items():
+        experiment_path = Path(str(configured_path)).expanduser()
+        if not experiment_path.is_absolute():
+            experiment_path = global_path.parent / experiment_path
+        experiment_path = experiment_path.resolve()
+        merged = _deep_merge(merged, _read_yaml(experiment_path))
+        config_paths[str(experiment_name)] = str(experiment_path)
     # 命令行和测试覆盖最后应用，因此始终优先于磁盘配置。
     config = _deep_merge(merged, overrides or {})
     # _runtime 只在内存中存在，不写回任何 YAML，也不参与断点兼容检查。

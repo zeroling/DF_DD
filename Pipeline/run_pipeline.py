@@ -1,8 +1,4 @@
-"""统一命令入口：在线 IDM 隐空间主流程和分阶段续训。
-
-完整主流程固定为 VAE→扩散→同构 IDM 动态模型池蒸馏→下游评价；静态专家和独立像素 IDM
-阶段均已删除。每个阶段只读取自己的目录和断点，因此既可整条执行，也可从任意阶段开始。
-"""
+"""统一命令入口：生成模型训练、标准 IDM condense 与下游评估。"""
 
 from __future__ import annotations
 
@@ -86,9 +82,9 @@ def run(
     stages = _select_stages(config, explicit_stages, from_stage, to_stage)
     # CLI IPC 覆盖优先；排序去重后让输出目录和日志顺序稳定。
     ipcs = sorted(set(selected_ipcs or [int(value) for value in config["condensation"]["ipc_values"]]))
-    # 当前论文实验设计固定报告 IPC=1/10/50，其他值需先扩展配置验证与实验协议。
-    if any(ipc not in {1, 10, 50} for ipc in ipcs):
-        raise ValueError("--ipc 只允许 1、10、50")
+    # 合并后的标准 IDM 消融入口当前固定研究 IPC=1。
+    if ipcs != [1]:
+        raise ValueError("标准 IDM condense/ablation 入口当前只允许 --ipc 1")
     # description 是不含大型张量的运行清单，可安全打印和写 JSON。
     description = {
         # config 是全局入口；config_files 记录实际合并的全部阶段文件。
@@ -135,7 +131,7 @@ def main() -> None:
 
     # ArgumentParser 同时服务根目录 run_pipeline.py 薄入口和模块直接运行。
     parser = argparse.ArgumentParser(
-        description="IPC 自适应医学图像数据集蒸馏：同构 IDM 模型池 + 可微隐空间扩散"
+        description="医学图像 IPC=1 标准 IDM 与 topology/latent 消融"
     )
     parser.add_argument(
         "--config",

@@ -1,366 +1,169 @@
-# 同构 IDM 动态模型池 + 隐空间扩散的医学图像数据集浓缩
+# 医学图像 IPC=1 数据集浓缩实验
 
-本项目面向二维医学图像分类数据集，实现一条完整主方法：冻结的 Autoencoder/扩散生成器
-负责把可学习 `z_T` 映射成图像；一次实验选择 ConvNet-6、ResNet-18、
-ConvNeXt-Tiny 或 ViT-Tiny 中的一种，同架构随机模型组成 IDM 动态池，只用真实数据
-持续更新，再用其分布匹配、分类和浅/中/深 RBF 拓扑梯度优化 `z_T`。
+项目现在使用一套统一的标准 IDM 实现。`condense` 不再是另一套隐空间管线，
+也不存在单独的 IDM 项目目录：
 
-项目不再训练或保存静态专家轨迹，不包含亚型发现、器官节点、解剖区域节点或特定疾病先验。
+- `Pipeline/Stages/condense.py`：标准 IDM 及其 topology / VAE / diffusion 扩展；
+- `Net/Condensation/idm_official.py`：官方 ConvNet-6、DSA、P&E 等基础组件；
+- `Pipeline/run_ablation.py`：D/C 实验编排；
+- `Pipeline/ablation_worker.py`：隔离每个子任务，结束后释放 CUDA 上下文。
 
-## 当前主流程
+## 配置结构
 
-默认执行顺序只有四个阶段：
-
-```text
-train_autoencoder
-        ↓
-train_diffusion
-        ↓
-condense（同构 IDM 动态模型池在这里创建和训练）
-        ↓
-evaluate
-```
-
-### 1. `train_autoencoder`
-
-使用 MONAI `AutoencoderKL` 从零训练图像编码器和解码器。MONAI 裸卷积 Decoder 的 raw 输出会统一经过 `tanh` 映射到 `[-1,1]`，AE 训练、确定性验证和扩散解码遵守同一契约。损失由 L1、可选 SSIM、KL 和可选 PatchGAN 构成；KL 对全隐变量取平均，并按 `autoencoder.yaml` 使用固定权重或从非零起点预热。日志同时报告原始/加权损失、zero-image L1 基线、raw 输出范围/越界率、tanh 饱和率和潜空间统计。训练结束后估计 `latent_scale = 1/std(z)`，供扩散训练和最终解码使用。
-
-### 2. `train_diffusion`
-
-冻结 Autoencoder，把真实训练图像编码到隐空间，从零训练共享的类别条件 `DiffusionModelUNet`。训练使用 DDPM 加噪、Min-SNR 加权、类别丢弃和 EMA；后续蒸馏优先加载 EMA 权重。
-
-这一阶段不使用 IDM 队列，也不优化合成数据。
-
-### 3. `condense`
-
-对每个类别创建 IPC 个可学习 `z_T`。每次蒸馏迭代按以下顺序执行：
-
-```text
-从所选同构架构的模型池随机抽取两个模型并冻结
-        ↓
-z_T → 可微 DDIM → 冻结 VAE Decoder → 合成图像
-        ↓
-真实/合成图分别经过本轮随机模型
-        ↓
-IDM 分布损失 + 可靠性加权 CE + 三层 RBF 拓扑损失
-        ↓
-随机模型梯度等权平均并穿过 VAE/DDIM，只更新 z_T
-        ↓
-只用真实类别均衡 batch 训练本轮模型 K 步
-        ↓
-定期加入同架构全新随机模型，达到该架构容量后 FIFO 淘汰
-```
-
-在线分类器从不使用合成图像更新参数，因此不会和合成数据互相“迁就”。断点保存当前
-活跃模型池及其优化器，不保存已经 FIFO 淘汰的历史权重。
-
-### 4. `evaluate`
-
-每个评估分类器重新随机初始化，只在 `condense` 生成的合成训练集上训练。真实验证集用于
-选择最佳 epoch 和准确率停滞早停，真实测试集只在恢复最佳验证权重后评估一次。
-
-报告指标包括：
-
-- Accuracy；
-- Balanced Accuracy；
-- Macro-F1；
-- 每类 Recall、Precision、Specificity；
-- 混淆矩阵；
-- 多次随机重复的均值和标准差。
-
-## 为什么每轮抽 2 个不等于只有 2 个随机种子
-
-模型池从 4 个随机模型开始，每 30 次凝聚加入一个全新随机初始化。默认 ConvNet-6
-最多保留100个；较大的架构使用更小的安全容量。每轮只随机抽取2个模型参与梯度计算
-和真实训练；这2个只是本轮样本，而不是随机种子总数。
-
-因此磁盘只需保存当前状态：
-
-```text
-checkpoint_last.pt
-├── z_T
-├── z_T optimizer
-├── 当前所选架构的全部池成员 + 各自 optimizer
-├── 成员出生迭代、更新次数和准确率 EMA
-├── 模型池随机采样器状态
-└── 随机数与早停状态
-```
-
-达到 `maximum_size` 后先淘汰最老成员，再加入新随机成员。
-
-## IPC 自适应损失
-
-- IPC=1：使用类别特征均值、可靠性加权 CE、中/深层为主的拓扑约束和弱 `z_T` 标准正态先验；不计算单样本无法可靠估计的协方差、MMD 和多样性。
-- IPC=10：继续使用原 IDM 均值匹配与分类正则，并叠加三层拓扑。
-- IPC=50：降低分类正则权重并保留三层拓扑；每次只更新每类部分隐变量以控制显存。
-
-三层拓扑节点只是规则空间网格，由所选网络统一提供的浅层、中层和深层空间特征构造
-RBF 亲和图。它是保留在原 IDM 同构模型池之上的方法创新。
-
-## 分文件配置
-
-项目不再使用根目录单体 `config.yaml`。默认入口是 [global.yaml](/D:/PyWorkRoom/MICCAI/configs/global.yaml)，其中 `stage_configs` 自动加载各阶段文件：
+配置按职责拆分：
 
 ```text
 configs/
-├── global.yaml          # 设备、数据、四网络逐层结构、默认阶段顺序
-├── autoencoder.yaml     # VAE/PatchGAN、损失、优化器、保存与早停
-├── diffusion.yaml       # U-Net、DDPM/Min-SNR/EMA、保存与早停
-├── condensation.yaml    # IDM 同构模型池、z_T、DDIM、拓扑、IPC 损失
-├── evaluation.yaml      # 新分类器训练、验证早停和真实测试
+├── global.yaml       # 设备、数据、网络结构和主阶段顺序
+├── autoencoder.yaml  # VAE 训练
+├── diffusion.yaml    # diffusion 训练
+├── condense.yaml     # IDM、latent、topology、显存和评估参数
+├── evaluation.yaml   # 原主流水线 evaluate 阶段
+└── ablation.yaml     # 只定义 D/C 实验矩阵、seed 和重复次数
 ```
 
-每个 YAML 参数旁都写有中文含义、有效范围或使用场景。加载顺序是：
+`global.yaml` 只引用这些文件，不再堆放消融算法参数。加载顺序是：
 
 ```text
 global.yaml
-→ stage_configs 指向的各阶段 YAML
-→ 命令行 --set 或测试覆盖
+→ stage_configs
+→ experiment_configs.ablation
+→ 命令行覆盖
 ```
 
-命令行覆盖拥有最高优先级，例如：
+本次运行开始时，D/C 启动器会把已经合并、校验过的配置写成
+`D_resolved_config.json` 或 `C_resolved_config.json`。同一次长任务中的所有子进程都
+读取这份快照，因此运行中编辑 YAML 不会造成 repeat 之间的配置漂移。重新执行命令时会
+生成新快照。不做配置、代码或数据哈希校验。
 
-```bash
-python run_pipeline.py --set condensation.idm_queue.models_per_iteration=4
-python run_pipeline.py --set models.definitions.vit_tiny.embed_dim=256
-python run_pipeline.py --set condensation.iterations.1=5000 --ipc 1
+## 实验定义
+
+D 组用于定位生成模型的信息损失：
+
+- D0：完整真实训练集；
+- D1：完整训练集经过 VAE encode/decode；
+- D2：完整训练集经过 DDIM inversion/reconstruction；
+- D3：每类随机一张真实图。
+
+C 组是统一 condense 实现上的六个消融：
+
+```text
+C0 标准 pixel IDM              C1 pixel IDM + topology
+C2 VAE z0                      C3 VAE z0 + topology
+C4 diffusion zT                C5 diffusion zT + topology
 ```
 
-## 可调网络结构
+C0 就是消融表中的 IDM baseline，不是额外的一套项目或另一份代码。
 
-[global.yaml](/D:/PyWorkRoom/MICCAI/configs/global.yaml) 中可以直接调节：
+## 一键运行
 
-- ConvNet：每个卷积块通道 `widths`、卷积核、GroupNorm 组数、激活、池化和三层特征索引；
-- ResNet：四阶段通道、每阶段 BasicBlock 数、stem 通道/卷积核/步长、是否最大池化、BatchNorm/GroupNorm；
-- ConvNeXt：四阶段 `depths`、`dims`、卷积核、patch size、drop path 和 LayerScale；
-- ViT：patch size、token 维度、block 数、注意力头数、MLP 比例、dropout/drop path 和三层 block 索引；
-- Autoencoder：每层通道、残差块数、注意力层和隐变量通道；
-- Diffusion U-Net：每层通道、残差块数、注意力层、注意力头通道和时间步。
-
-改变网络结构后，旧权重张量若形状不兼容会正常报错；这不是哈希校验，而是权重无法装入不同结构。
-
-## IDM 模型池可调参数
-
-[condensation.yaml](/D:/PyWorkRoom/MICCAI/configs/condensation.yaml) 中包括：
-
-- 同一次实验使用的同构架构：`convnet`、`resnet18`、`convnext_tiny` 或 `vit_tiny`；
-- 初始模型池大小和最大容量；
-- 每轮随机抽取多少个模型；
-- 每个成员一次训练多少真实 batch；
-- 每隔多少次凝聚加入一个全新随机种子；
-- 在线 batch size、标签平滑和准确率 EMA；
-- 每种可选架构的安全池容量、batch 和独立优化器策略。
-
-新加入成员不预热，会真正从随机阶段进入模型池。
-
-切换架构时必须使用新的 `run_dir`，例如：
-
-```bash
-python run_pipeline.py --stage condense --ipc 1 \
-  --set condensation.idm_queue.architecture=convnext_tiny \
-  --run-dir outputs/idm_topology_convnext
-```
-
-## 保存频率与早停
-
-各阶段独立配置：
-
-- `checkpoint_interval_epochs` 或 `checkpoint_interval_iterations`：保存 `checkpoint_last.pt` 的间隔；
-- `preview_interval_epochs` 或 `preview_interval_iterations`：保存预览图的间隔；
-- `log_interval_epochs` 或 `log_interval_iterations`：日志间隔；
-- `patience_checks`：连续多少次检查无改善后停止；
-- `min_delta`：至少改善多少才重置耐心计数；
-- `minimum_epochs` / `minimum_iterations`：允许早停前的最低训练量；
-- `reset_on_resume`：续训时是否清空早停历史。
-
-`condense` 的定期预览会分批解码并保存当前完整的 `类别数×IPC` 合成图，而不是只取
-每类第一张；`condensation.preview_batch_size` 只控制预览解码显存。
-
-Autoencoder 监控真实验证 L1；Diffusion 监控真实验证去噪损失；Evaluation 监控真实验证 Balanced Accuracy。Condensation 的在线损失波动较大，因此完整阶段早停默认关闭，但成员级准确率停滞替换可独立开启。
-
-## 安装
-
-建议使用 Python 3.10–3.12。先根据服务器 CUDA 版本安装相匹配的 PyTorch，再安装其余依赖：
-
-```bash
-pip install torch torchvision --index-url <与你的 CUDA 对应的 PyTorch 源>
-pip install -r requirements.txt
-```
-
-项目只使用安装后的 MONAI 网络和调度器定义，不下载 MONAI 或其他第三方预训练权重。
-
-### Windows
-
-PowerShell 中建议从项目根目录激活虚拟环境并先做配置检查：
+PowerShell：
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+.\run_D_experiments.cmd
+.\run_C_experiments.cmd
+```
+
+正式 C 组默认使用 5 个 condensation seed，每个合成集评估 5 次。短流程和局部实验：
+
+```powershell
+.\run_C_experiments.cmd --profile pilot
+.\run_C_experiments.cmd --only C0 --only C2
+.\run_C_experiments.cmd --only C5 --smoke
+.\run_D_experiments.cmd --only D3 --smoke
+```
+
+主流水线也可以直接调用统一后的默认 condense 方法：
+
+```powershell
 python run_pipeline.py --dry-run
 python run_pipeline.py --stage condense --ipc 1
 ```
 
-入口文件名是 `run_pipeline.py`（不是 `run_pipline.py`）。Windows 下项目不会启用
-当前平台不支持的 CUDA `expandable_segments`，并让 Python 正常处理 Ctrl+C；手动停止时
-会以退出码 130 结束，不再由 Intel Fortran 运行库打印 `forrtl error (200)`。
+默认方法由 `configs/condense.yaml` 的 `condensation.default_method` 指定。当前标准
+IDM 消融协议固定为 IPC=1。
 
-Windows 的 DataLoader 默认读取 `project.windows_num_workers: 0`，避免 `spawn` 重复导入
-PyTorch/MONAI 导致内存陡增。内存充足时可以在 `configs/global.yaml` 中逐步提高到 1、2
-或 4；Linux 继续使用 `project.num_workers`。
+## 断点与中断
 
-#### 16GB 显卡运行 `condense`
+- condensation、评估和 D1/D2 缓存都支持断点继续；
+- 自动读取最新可读断点，不比较哈希；
+- D1/D2 使用可续写的 uint8 memmap；
+- 每个 condensation / architecture / repeat 使用独立子进程；
+- 子进程退出后回收 Python 引用、CUDA cache 和 IPC 句柄；
+- `checkpoint_last.pt` 使用原子替换，断电时最多损失当前保存间隔。
 
-默认 `condensation.yaml` 已按 224×224、RTX 4070 Ti SUPER 16GB 调整：开启可微 DDIM
-激活检查点，ConvNet 的 `real_per_class=8`、在线训练 batch=16，IPC=10/50 每类每轮只
-反传两个合成隐变量，预览和最终导出 batch 均为 4。这些调整不改变已经训练好的
-Autoencoder/Diffusion 网络结构或权重；代价是 DDIM 反向会因重算激活而稍慢。
+如果按 `Ctrl+C`，重新运行同一命令即可继续。入口文件是 `run_pipeline.py`，不是
+`run_pipline.py`。
 
-如果显卡同时被其他程序大量占用，可进一步临时使用保守档：
+## 4070 Ti SUPER 16GB 显存设置
 
-```powershell
-python run_pipeline.py --stage condense --ipc 1 `
-  --set condensation.real_per_class.convnet=4 `
-  --set condensation.idm_queue.batch_size.convnet=8 `
-  --set condensation.preview_batch_size=2 `
-  --set condensation.export_batch_size=2
+安全参数集中在 `configs/condense.yaml`：
+
+```yaml
+condensation:
+  memory:
+    max_reserved_fraction: 0.72
+    real_feature_microbatch: 64
+    real_train_microbatch: 32
 ```
 
-## 数据接口
+预检会真实执行前向、DSA、反向和 optimizer step，并以
+`torch.cuda.max_memory_reserved()` 判断，而不是只看偏低的 allocated memory。超过
+物理显存的 72% 时自动把 batch 减半。有效 IDM 真实 batch 仍是 128，内部用 microbatch
+累积保持算法定义。
 
-数据层统一输出 `[0,1]` 的 `float32 [C,H,W]`。分类器 mean/std 归一化和生成模型 `[-1,1]` 映射分别在对应阶段完成。
+RTX 4070 Ti SUPER 实测单轮峰值：
 
-### 文件夹格式
+| 路径 | reserved 峰值 |
+|---|---:|
+| D0 / C0 官方 ConvNet-6 评估 | 5010 MiB |
+| C0 pixel IDM condense | 6808 MiB |
+| C2 VAE z0 condense | 7472 MiB |
+| C4 diffusion zT condense | 7812 MiB |
+| C5 diffusion zT + topology | 8348 MiB |
 
-`data.adapter: folder` 时使用：
+以上均未进入 Windows 共享 GPU 内存。不要把 `max_reserved_fraction` 调成 0.95；
+Windows/WDDM 下这会允许 allocator 逼近 16GB 物理显存，容易再次溢出到共享内存。
+
+## 权重要求
+
+C0/C1 不需要 VAE 或 diffusion 权重。D1、C2、C3 需要：
+
+```text
+outputs/online_idm_latent_diffusion_tanh_v2/autoencoder/checkpoint_last.pt
+```
+
+D2、C4、C5 还需要：
+
+```text
+outputs/online_idm_latent_diffusion_tanh_v2/diffusion/checkpoint_last.pt
+```
+
+恢复权重时不校验哈希，但模型张量形状必须与当前 `autoencoder.yaml` /
+`diffusion.yaml` 一致。
+
+## 数据目录
+
+默认 folder adapter：
 
 ```text
 data/COVID/
-├── train/
-│   ├── COVID/
-│   ├── Lung_Opacity/
-│   ├── Normal/
-│   └── Viral Pneumonia/
-├── val/                 # 可选；缺失时从 train 按类别确定性划分
-│   └── ...同样类别目录
-└── test/
-    └── ...同样类别目录
+├── train/<class name>/
+├── val/<class name>/      # 可选
+└── test/<class name>/
 ```
 
-### 清单格式
+数据层输出 `[0,1]` 的 `float32 [C,H,W]`。分类器归一化与生成模型 `[-1,1]`
+映射分别在对应模块内完成。Windows 默认 `project.windows_num_workers: 0`，避免
+DataLoader spawn 重复导入大型依赖。
 
-把 `data.adapter` 改为 `manifest` 后，可读取 CSV、JSON 或 JSONL：
+## 安装与快速检查
 
-```csv
-path,label,split
-images/a001.npy,DiseaseA,train
-images/a002.dcm,DiseaseA,test
-```
+先安装适配本机 CUDA 的 PyTorch，再安装其余依赖：
 
-支持 PNG/JPEG/BMP/TIFF/WebP、`.npy/.npz`、`.pt/.pth` 和 DICOM。图像尺寸可配置为整数或 `[高度, 宽度]`，通道数支持 1 或 3，默认 `224×224×3`。
-
-## 运行方式
-
-检查合并后的阶段顺序、设备、IPC 和配置文件：
-
-```bash
+```powershell
+pip install -r requirements.txt
+python -m unittest tests.test_idm_ablation
 python run_pipeline.py --dry-run
 ```
-
-运行完整四阶段：
-
-```bash
-python run_pipeline.py
-```
-
-只运行 IPC=1：
-
-```bash
-python run_pipeline.py --ipc 1
-```
-
-从指定阶段开始：
-
-```bash
-python run_pipeline.py --from-stage train_diffusion --ipc 1
-```
-
-单独运行某个阶段：
-
-```bash
-python run_pipeline.py --stage train_autoencoder
-python run_pipeline.py --stage train_diffusion
-python run_pipeline.py --stage condense --ipc 1
-python run_pipeline.py --stage evaluate --ipc 1
-```
-
-使用另一份全局配置入口：
-
-```bash
-python run_pipeline.py --config configs/global.yaml
-```
-
-## 断点恢复规则
-
-再次指向同一个 `project.run_dir` 或 `--run-dir` 时：
-
-- 优先读取阶段目录中的 `checkpoint_last.pt`；没有时读取进度最大的完整 `.pt/.pth`；
-- 断点 `epoch=78`、当前目标 `epochs=100` 时，从第 79 轮继续；
-- 断点 `iteration=4000`、当前目标 `iterations=6000` 时，从第 4001 次继续；
-- 当前 YAML 中的学习率和目标训练量覆盖断点旧值；
-- 不生成或比较配置、代码、数据哈希；
-- IDM 模型池恢复全部活跃成员、优化器、训练年龄、可靠性和随机采样状态；
-- 减小最大容量时保留最新成员，增大容量后继续按固定间隔自然增长；
-- 异构旧版凝聚断点不会恢复 `z_T` 或模型队列，而是明确提示并从第 0 次重新开始；
-- 模型结构或类别数造成权重形状不兼容时会明确报错。
-
-要完全从头开始，请指定新的 `run_dir`，不要删除已有实验目录。
-
-## 输出结构
-
-```text
-outputs/online_idm_latent_diffusion/
-├── autoencoder/
-│   ├── checkpoint_last.pt
-│   ├── summary.json
-│   └── preview_epoch_*.png
-├── diffusion/
-│   ├── checkpoint_last.pt
-│   ├── summary.json
-│   └── preview_epoch_*.png
-├── condensed/
-│   └── ipc_<N>/
-│       ├── checkpoint_last.pt
-│       ├── synthetic.pt
-│       ├── preview.png
-│       ├── preview_iteration_*.png
-│       └── images/<class>/synthetic_*.png
-├── evaluation/
-│   └── condensed/ipc_<N>/<architecture>/repeat_<N>/
-│       ├── checkpoint_last.pt
-│       ├── checkpoint_best.pt
-│       └── result.json
-├── run_manifest.json
-└── pipeline_summary.json
-```
-
-## 测试
-
-快速测试：
-
-```bash
-python smoke_test.py
-```
-
-微型端到端测试会运行完整四阶段，再修改轮数和学习率从 1 继续到 2；IDM 模型池随
-`condensed` 断点一起恢复：
-
-```bash
-python smoke_test.py --integration
-```
-
-## 思想与上游实现来源
-
-- IDM：<https://github.com/uitrbn/IDM>，*Improved Distribution Matching for Dataset Condensation*，CVPR 2023。
-- MONAI Generative Models：<https://github.com/Project-MONAI/GenerativeModels>。项目使用安装版 MONAI 中的 `AutoencoderKL`、`DiffusionModelUNet`、调度器和可选 `PatchDiscriminator`，全部从零训练。
-- 浅/中/深 RBF 拓扑构造改造自用户提供的 *Lite-MyoNet: An Edge-Based Network for Pathological Gait Analysis via Topology-Preserving Distillation*，已经删除时间动态、人体节点和任务特定结构。
-
-正式运行不依赖克隆的第三方仓库。

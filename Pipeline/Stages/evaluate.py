@@ -23,7 +23,6 @@ from Core.checkpoint import (
     set_optimizer_learning_rate,
     training_payload,
 )
-from Core.config import stage_dir
 from Core.data import build_data_bundle, build_loader, unpack_batch
 from Core.io_utils import atomic_write_json
 from Core.logging_utils import get_stage_logger
@@ -37,6 +36,7 @@ from Core.run_context import (
 from Core.seed import seed_everything
 from Core.training import EarlyStopping, advance_scheduler_to
 from Net.Classification.factory import build_classifier_from_config, build_training_policy
+from Pipeline.ablation_config import condensation_settings, output_root
 
 
 class SyntheticTensorDataset(Dataset):
@@ -97,21 +97,22 @@ def _evaluation_variant_parts(config: Mapping[str, Any]) -> list[str]:
 
 
 def _synthetic_path(config: Mapping[str, Any], source: str, ipc: int) -> Path:
-    """定位主方法 condensed 阶段生成的合成数据文件。"""
+    """定位统一 condense 阶段生成的默认方法合成集。"""
 
     # 当前评估来源固定为主流程 condensed。
     if str(source) != "condensed":
         raise ValueError(f"未知评估来源：{source}；当前只保留 condensed")
-    stage_name = "condensed"
-    # 查询路径时不创建不存在的阶段目录。
-    ipc_directory = stage_dir(config, stage_name, create=False) / f"ipc_{int(ipc)}"
+    if int(ipc) != 1:
+        raise ValueError("统一后的标准 IDM evaluate 当前只支持 IPC=1")
     iteration = _snapshot_iteration(config)
-    if iteration is None:
-        return ipc_directory / "synthetic.pt"
+    if iteration is not None:
+        raise ValueError("新 condense 实现不再导出中间 synthetic snapshot")
+    method = str(condensation_settings(config).get("default_method", "C0"))
     return (
-        ipc_directory
-        / "snapshots"
-        / f"iteration_{iteration:06d}"
+        output_root(config)
+        / "C"
+        / method
+        / "condense_seed_0"
         / "synthetic.pt"
     )
 

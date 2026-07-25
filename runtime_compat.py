@@ -47,6 +47,15 @@ def configure_runtime() -> None:
     _sanitize_positive_thread_variable("MKL_NUM_THREADS")
 
     if sys.platform == "win32":
+        # PowerShell/cmd 的活动代码页可能仍是 GBK。统一 Python 标准流为 UTF-8，
+        # 避免子进程编排日志和 argparse 中文帮助出现乱码。
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                try:
+                    reconfigure(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    pass
         # Intel Fortran/MKL 默认会抢先处理控制台 Ctrl+C 并打印 forrtl error
         # (200)。关闭它后，信号由 Python 转换为正常的 KeyboardInterrupt。
         os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
@@ -66,4 +75,3 @@ def configure_runtime() -> None:
             "PYTORCH_CUDA_ALLOC_CONF",
             "expandable_segments:True",
         )
-
