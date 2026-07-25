@@ -1,0 +1,23 @@
+{
+  "experiment": "D1",
+  "complete": true,
+  "completed_count": 16930,
+  "count": 16930,
+  "shape": [
+    16930,
+    3,
+    224,
+    224
+  ],
+  "dtype": "uint8",
+  "class_names": [
+    "COVID",
+    "Lung_Opacity",
+    "Normal",
+    "Viral Pneumonia"
+  ],
+  "microbatch": 2,
+  "cuda_peak_mib": 5930.0,
+  "autoencoder_checkpoint": "D:\\PyWorkRoom\\MICCAI\\outputs\\online_idm_latent_diffusion_tanh_v2\\autoencoder\\checkpoint_last.pt",
+  "diffusion_checkpoint": null
+}

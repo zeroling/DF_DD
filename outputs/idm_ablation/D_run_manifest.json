@@ -1,0 +1,14 @@
+{
+  "group": "D",
+  "profile": "formal",
+  "smoke": false,
+  "config": "D:\\PyWorkRoom\\MICCAI\\configs\\global.yaml",
+  "resume_policy": "最新可读断点自动恢复；不进行哈希校验",
+  "environment": {
+    "pid": "32152",
+    "torch": "2.12.1+cu126",
+    "cuda": "12.6",
+    "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "gpu_memory_mib": "16375"
+  }
+}
