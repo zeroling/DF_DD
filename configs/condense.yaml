@@ -1,0 +1,115 @@
+# ============================================================================
+# condense 阶段：标准 IDM IPC=1 基线及 topology / VAE / diffusion 扩展。
+# 所有算法、显存和合成集评估参数都集中在本文件。
+# ============================================================================
+
+condensation:
+  default_method: C0
+  ipc_values: [1]
+
+  memory:
+    # RTX 4070 Ti SUPER 16GB / Windows WDDM 安全上限。
+    max_reserved_fraction: 0.95
+    real_feature_microbatch: 64
+    real_train_microbatch: 32
+    reconstruction_batch:
+      vae: 32
+      diffusion: 32
+    evaluation_batch:
+      idm_convnet6: 64
+      resnet18: 64
+      convnext_tiny: 64
+      vit_tiny: 64
+    inference_batch:
+      idm_convnet6: 64
+      resnet18: 96
+      convnext_tiny: 32
+      vit_tiny: 48
+    retry_minimum: 1
+
+  idm:
+    ipc: 1
+    iterations: 20000
+    image_learning_rate: 0.2
+    image_momentum: 0.5
+    ce_weight: 3.0
+    train_net_num: 1
+    fetch_net_num: 2
+    model_train_steps: 10
+    net_num: 50
+    net_generate_interval: 50
+    batch_real: 128
+    batch_train: 128
+    lr_net: 0.01
+    net_momentum: 0.9
+    net_weight_decay: 0.0005
+    dsa_strategy: color_crop_cutout_flip_scale_rotate
+    partition_expansion: 2
+    minimum_reliability: 0.0
+    checkpoint_interval_iterations: 50
+    preview_interval_iterations: 500
+    log_interval_iterations: 10
+
+  latent:
+    learning_rate:
+      vae_z0: 0.2
+      diffusion_zT: 0.2
+    prior:
+      vae_z0: 0.0001
+      diffusion_zT: 0.005
+    ddim_steps: 20
+    guidance_scale: 2.5
+    gradient_checkpointing: true
+
+  topology:
+    grids:
+      shallow: [14, 14]
+      middle: [7, 7]
+      deep: [7, 7]
+    divergence: js
+    minimum_bandwidth: 0.0001
+    level_weights:
+      shallow: 0.1
+      middle: 0.4
+      deep: 0.5
+    calibration_iterations: [1, 5, 10, 20, 50]
+    target_gradient_fraction: 0.25
+    minimum_lambda: 0.1
+    maximum_lambda: 5.0
+
+  evaluation:
+    architectures: [idm_convnet6, resnet18, convnext_tiny, vit_tiny]
+    epochs:
+      idm_convnet6: 1000
+      resnet18: 300
+      convnext_tiny: 300
+      vit_tiny: 300
+    checkpoint_interval_epochs: 10
+    log_interval_epochs: 10
+    optimization:
+      idm_convnet6:
+        optimizer: sgd
+        learning_rate: 0.01
+        momentum: 0.9
+        weight_decay: 0.0005
+        schedule: official_step
+      resnet18:
+        optimizer: sgd
+        learning_rate: 0.01
+        momentum: 0.9
+        weight_decay: 0.0005
+        nesterov: true
+        schedule: cosine
+        min_learning_rate: 0.00001
+      convnext_tiny:
+        optimizer: adamw
+        learning_rate: 0.0005
+        weight_decay: 0.05
+        schedule: cosine
+        min_learning_rate: 0.000001
+      vit_tiny:
+        optimizer: adamw
+        learning_rate: 0.0005
+        weight_decay: 0.05
+        schedule: cosine
+        min_learning_rate: 0.000001

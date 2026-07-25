@@ -1,0 +1,37 @@
+# ============================================================================
+# IPC=1 消融实验矩阵。这里只定义“跑哪些实验”，不存放 IDM 算法超参数。
+# ============================================================================
+
+ablation:
+  # 保留原输出根目录，使已经完成的 D0 repeat 断点/结果可以直接续用。
+  output_root: outputs/idm_ablation
+  default_profile: formal
+
+  profiles:
+    pilot:
+      condensation_seeds: 1
+      evaluation_repeats: 3
+    formal:
+      condensation_seeds: 5
+      evaluation_repeats: 5
+
+  # C0 是标准 IDM；C1–C5 只改变参数化方式和 topology 开关。
+  methods:
+    C0: {parameterization: pixel, topology: false}
+    C1: {parameterization: pixel, topology: true}
+    C2: {parameterization: vae_z0, topology: false}
+    C3: {parameterization: vae_z0, topology: true}
+    C4: {parameterization: diffusion_zT, topology: false}
+    C5: {parameterization: diffusion_zT, topology: true}
+
+  diagnostic:
+    experiments: [D0, D1, D2, D3]
+    repeats: 1
+    full_data_epochs: 100
+    random_ipc_epochs: 1000
+    checkpoint_interval_epochs: 10
+    log_interval_epochs: 5
+    cache_flush_interval_batches: 20
+    diffusion_reconstruction:
+      inference_steps: 20
+      guidance_scale: 2.5
