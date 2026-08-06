@@ -1,0 +1,59 @@
+{
+  "dataset": "covid",
+  "ipc": 1,
+  "architecture": "vgg11",
+  "repeat": 4,
+  "seed": 7106062,
+  "epochs": 1000,
+  "synthetic_dataset": "D:\\PyWorkRoom\\MICCAI\\outputs\\final\\covid\\ipc_1\\condense_seed_0\\synthetic.pt",
+  "train_metrics": {
+    "loss": 0.00012236706970725209,
+    "accuracy": 1.0
+  },
+  "test_metrics": {
+    "loss": 1.2919838808221829,
+    "accuracy": 0.710271546635183,
+    "balanced_accuracy": 0.7155497938862595,
+    "macro_f1": 0.668480682592506,
+    "per_class_recall": [
+      0.4654696132596685,
+      0.7065669160432253,
+      0.7719470328592447,
+      0.9182156133828996
+    ],
+    "confusion_matrix": [
+      [
+        337,
+        124,
+        240,
+        23
+      ],
+      [
+        108,
+        850,
+        214,
+        31
+      ],
+      [
+        161,
+        127,
+        1574,
+        177
+      ],
+      [
+        3,
+        10,
+        9,
+        247
+      ]
+    ]
+  },
+  "memory": {
+    "train_batch": 16,
+    "test_batch": 128,
+    "train_preflight_peak_mib": 1588.0,
+    "test_preflight_peak_mib": 2014.0,
+    "train_preflight_fraction": 0.09697413819425361,
+    "test_preflight_fraction": 0.12298861103477757
+  }
+}

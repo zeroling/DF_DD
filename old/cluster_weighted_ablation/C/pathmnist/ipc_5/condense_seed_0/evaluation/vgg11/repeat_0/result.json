@@ -1,0 +1,142 @@
+{
+  "dataset": "pathmnist",
+  "ipc": 5,
+  "condensation_seed": 0,
+  "architecture": "vgg11",
+  "repeat": 0,
+  "seed": 7502026,
+  "epochs": 1000,
+  "training_updates": 1001,
+  "synthetic_dataset": "D:\\PyWorkRoom\\MICCAI\\outputs\\cluster_weighted_ablation\\C\\pathmnist\\ipc_5\\condense_seed_0\\synthetic.pt",
+  "synthetic_iteration": 20000,
+  "train_metrics": {
+    "loss": 0.0006807752406328088,
+    "accuracy": 1.0
+  },
+  "test_metrics": {
+    "loss": 2.2596956215861117,
+    "accuracy": 0.593175487465181,
+    "balanced_accuracy": 0.5469468245476057,
+    "macro_f1": 0.5097271542487414,
+    "per_class_recall": [
+      0.9245142002989537,
+      1.0,
+      0.4631268436578171,
+      0.8406940063091483,
+      0.19130434782608696,
+      0.15033783783783783,
+      0.47638326585695007,
+      0.28978622327790976,
+      0.5863746958637469
+    ],
+    "confusion_matrix": [
+      [
+        1237,
+        64,
+        0,
+        0,
+        17,
+        7,
+        2,
+        11,
+        0
+      ],
+      [
+        0,
+        847,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        50,
+        157,
+        49,
+        1,
+        4,
+        18,
+        47,
+        13
+      ],
+      [
+        0,
+        0,
+        18,
+        533,
+        1,
+        2,
+        17,
+        9,
+        54
+      ],
+      [
+        198,
+        17,
+        67,
+        36,
+        198,
+        48,
+        240,
+        190,
+        41
+      ],
+      [
+        0,
+        2,
+        160,
+        75,
+        9,
+        89,
+        97,
+        109,
+        51
+      ],
+      [
+        7,
+        0,
+        30,
+        105,
+        22,
+        29,
+        353,
+        47,
+        148
+      ],
+      [
+        2,
+        7,
+        95,
+        65,
+        6,
+        32,
+        59,
+        122,
+        33
+      ],
+      [
+        2,
+        11,
+        151,
+        147,
+        12,
+        92,
+        90,
+        5,
+        723
+      ]
+    ]
+  },
+  "memory": {
+    "train_batch": 128,
+    "test_batch": 512,
+    "train_preflight_peak_mib": 1928.0,
+    "test_preflight_peak_mib": 3404.0,
+    "train_preflight_fraction": 0.11773686299654973,
+    "test_preflight_fraction": 0.20787151537357637
+  }
+}
