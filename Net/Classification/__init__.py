@@ -1,6 +1,5 @@
-"""可用于 IDM 动态模型池和下游评估的分类网络。"""
+"""Evaluation architectures used by the HoP-TM protocol."""
 
-from Net.Classification.factory import build_classifier_from_config
-from Net.Classification.features import ClassifierOutput
+from .protocol import build_evaluation_model
 
-__all__ = ["ClassifierOutput", "build_classifier_from_config"]
+__all__ = ["build_evaluation_model"]

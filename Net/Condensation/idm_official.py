@@ -1,8 +1,8 @@
-"""可审计的官方 IDM ImageNet IPC=1 网络、DSA 与 P&E 适配。
+"""Auditable IDM ConvNet, DSA, and P&E building blocks.
 
-算法定义对应官方 IDM 的 ``IDM_imagenet.py``、``dc_networks.py`` 和
-``dc_utils.py``（提交 ``fe23bbcd26f664f7f27479e298866a2ff1cc5005``）。
-这里只保留实际使用的 ConvNet-6、DSA 与 P&E，不附带整份上游仓库。
+The configurable Conv-IN-ReLU-AvgPool network follows the official IDM
+implementation. Dataset configuration selects ConvNetD3 for PathMNIST and
+ConvNetD5 for 112x112 COVID19-CXR.
 """
 
 from __future__ import annotations
@@ -20,23 +20,30 @@ import torch.nn.functional as F
 class IDMFeatures:
     logits: torch.Tensor
     embedding: torch.Tensor
-    spatial: dict[str, torch.Tensor]
 
 
-class OfficialConvNet6(nn.Module):
-    """IDM ImageNet 使用的 6×(Conv-IN-ReLU-AvgPool) 网络。"""
+class OfficialIDMConvNet(nn.Module):
+    """IDM 使用的可配置深度 Conv-IN-ReLU-AvgPool 网络。"""
 
     def __init__(
         self,
         channels: int,
         num_classes: int,
         image_size: Sequence[int],
+        depth: int,
     ) -> None:
         super().__init__()
         height, width = map(int, image_size)
+        self.depth = int(depth)
+        if self.depth < 3:
+            raise ValueError("IDM ConvNet 至少需要 3 个 block")
+        if min(height, width) // (2**self.depth) < 1:
+            raise ValueError(
+                f"图像 {height}x{width} 无法经过 {self.depth} 次池化"
+            )
         layers: list[nn.Module] = []
         input_channels = int(channels)
-        for _ in range(6):
+        for _ in range(self.depth):
             layers.extend(
                 [
                     nn.Conv2d(input_channels, 128, kernel_size=3, padding=1),
@@ -57,51 +64,44 @@ class OfficialConvNet6(nn.Module):
         return self.classifier(features.flatten(1))
 
 
-class IDMConvNet6(nn.Module):
-    """官方 6-block、width=128、InstanceNorm、ReLU、AvgPool ConvNet。"""
+class IDMConvNet(nn.Module):
+    """官方风格、width=128、InstanceNorm、ReLU、AvgPool ConvNet。"""
 
-    def __init__(self, channels: int, num_classes: int, image_size: Sequence[int]):
+    def __init__(
+        self,
+        channels: int,
+        num_classes: int,
+        image_size: Sequence[int],
+        depth: int,
+    ):
         super().__init__()
-        self.network = OfficialConvNet6(
+        self.depth = int(depth)
+        self.network = OfficialIDMConvNet(
             channels=int(channels),
             num_classes=int(num_classes),
             image_size=image_size,
+            depth=self.depth,
         )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         return self.network(images)
 
-    def forward_idm(
-        self,
-        images: torch.Tensor,
-        include_topology: bool,
-    ) -> IDMFeatures:
-        """返回官方最终 feature map，并可选抓取 1/3/6 block 空间特征。"""
+    def forward_idm(self, images: torch.Tensor) -> IDMFeatures:
+        """Return the official final spatial embedding and class logits."""
 
-        feature = images
-        spatial: dict[str, torch.Tensor] = {}
-        # 官方每个 block 恰好是 Conv、GroupNorm(C 组)、ReLU、AvgPool 四个模块。
-        block_names = {0: "shallow", 2: "middle", 5: "deep"}
-        modules = list(self.network.features.children())
-        for block_index in range(6):
-            start = block_index * 4
-            for module in modules[start : start + 4]:
-                feature = module(feature)
-            if include_topology and block_index in block_names:
-                spatial[block_names[block_index]] = feature
+        feature = self.network.features(images)
         embedding = feature
         logits = self.network.classifier(feature.flatten(1))
-        return IDMFeatures(logits=logits, embedding=embedding, spatial=spatial)
+        return IDMFeatures(logits=logits, embedding=embedding)
 
 
-def build_idm_convnet6(
+def build_idm_convnet(
     channels: int,
     num_classes: int,
     image_size: Sequence[int],
-) -> IDMConvNet6:
-    return IDMConvNet6(channels, num_classes, image_size)
-
-
+    depth: int,
+) -> IDMConvNet:
+    return IDMConvNet(channels, num_classes, image_size, depth)
 class ParamDiffAug:
     """官方 DSA 默认参数。"""
 
@@ -297,8 +297,10 @@ def partition_and_expand(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """官方 ImageNet IPC=1 的 2×2 Partitioning & Expansion。"""
 
+    if int(factor) == 1:
+        return images, labels
     if int(factor) != 2:
-        raise ValueError("当前忠实 IDM 适配固定支持 P&E 2×2")
+        raise ValueError("IDM P&E 只支持 1×1 或 2×2")
     height, width = images.shape[-2:]
     if height % 2 or width % 2:
         raise ValueError("P&E 2×2 要求图像高宽为偶数")
@@ -326,34 +328,44 @@ def initialize_partitioned_pixels(
     class_pool,
     num_classes: int,
     image_size: Sequence[int],
+    ipc: int = 1,
+    factor: int = 2,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """每类用四张真实图的缩小版本填充四个象限，与官方 ``--aug`` 初始化一致。"""
+    """按 IPC 初始化；2×2 时每个 canvas 用四张真实图填充象限。"""
 
     height, width = map(int, image_size)
     images = []
     labels = []
     for class_id in range(int(num_classes)):
-        real = class_pool.sample(class_id, 4)
-        canvas = torch.empty(
-            (1, real.shape[1], height, width), dtype=torch.float32
-        )
-        for patch_index, (row, column) in enumerate(
-            ((0, 0), (1, 0), (0, 1), (1, 1))
-        ):
-            patch = F.interpolate(
-                real[patch_index : patch_index + 1],
-                size=(height // 2, width // 2),
-                mode="bilinear",
-                align_corners=False,
+        if int(factor) == 1:
+            class_images = class_pool.sample(class_id, int(ipc))
+        elif int(factor) == 2:
+            real = class_pool.sample(class_id, 4 * int(ipc))
+            class_images = torch.empty(
+                (int(ipc), real.shape[1], height, width),
+                dtype=torch.float32,
             )
-            canvas[
-                :,
-                :,
-                row * height // 2 : (row + 1) * height // 2,
-                column * width // 2 : (column + 1) * width // 2,
-            ] = patch
-        images.append(canvas)
-        labels.append(class_id)
+            for image_index in range(int(ipc)):
+                for patch_index, (row, column) in enumerate(
+                    ((0, 0), (1, 0), (0, 1), (1, 1))
+                ):
+                    source = 4 * image_index + patch_index
+                    patch = F.interpolate(
+                        real[source : source + 1],
+                        size=(height // 2, width // 2),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    class_images[
+                        image_index : image_index + 1,
+                        :,
+                        row * height // 2 : (row + 1) * height // 2,
+                        column * width // 2 : (column + 1) * width // 2,
+                    ] = patch
+        else:
+            raise ValueError("初始化只支持 P&E factor=1 或 2")
+        images.append(class_images)
+        labels.extend([class_id] * int(ipc))
     return torch.cat(images), torch.tensor(labels, dtype=torch.long)
 
 

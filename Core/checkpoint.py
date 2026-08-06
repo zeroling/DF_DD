@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os  # 同目录原子替换临时断点。
+import time  # 捕获异常后休眠等待，应对 Windows 文件锁定。
 import random  # 捕获和恢复 Python 随机状态。
 import re  # 从旧式权重文件名中提取 epoch/step 进度。
 import warnings  # 附加 RNG 状态不兼容时警告后继续恢复主权重。
@@ -33,8 +34,30 @@ def atomic_torch_save(payload: Any, path: str | Path) -> Path:
     temporary = target.with_suffix(target.suffix + ".tmp")
     # 完整序列化到临时文件；若此处中断，旧的正式断点仍然完好。
     torch.save(payload, temporary)
+
     # 写完后一次替换正式文件，Windows 和 Linux 均支持覆盖已有目标。
-    os.replace(temporary, target)
+    # 增加重试机制，专治 Windows 下杀毒软件/同步盘扫描导致的 WinError 5 文件锁定问题
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            os.replace(temporary, target)
+            break  # 成功则跳出循环
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                # 每次失败后等待的时间逐渐增加：0.5s, 1.0s, 1.5s...
+                sleep_time = 0.5 * (attempt + 1)
+                warnings.warn(
+                    f"保存文件时被系统锁定，{sleep_time} 秒后尝试第 {attempt + 2} 次覆盖: {target.name}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                time.sleep(sleep_time)
+            else:
+                raise RuntimeError(
+                    f"WinError 5: 在 {max_retries} 次尝试后仍无法覆盖 {target}。\n"
+                    "请检查文件是否被 Windows Defender 或云盘（如 OneDrive）锁定。"
+                ) from e
+
     return target
 
 
@@ -246,14 +269,14 @@ def _strip_module_prefix(state: Mapping[str, torch.Tensor]) -> dict[str, torch.T
 
 
 def restore_training_state(
-    directory: str | Path,
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer | None = None,
-    scheduler: Any | None = None,
-    scaler: Any | None = None,
-    device: str | torch.device = "cpu",
-    strict: bool = True,
-    restore_rng: bool = True,
+        directory: str | Path,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: Any | None = None,
+        scaler: Any | None = None,
+        device: str | torch.device = "cpu",
+        strict: bool = True,
+        restore_rng: bool = True,
 ) -> tuple[int, Path | None, dict | None]:
     """从目录中最新权重恢复并返回 ``(已完成进度, 路径, 断点)``。
 
@@ -296,13 +319,13 @@ def set_optimizer_learning_rate(optimizer: torch.optim.Optimizer, learning_rate:
 
 
 def training_payload(
-    model: torch.nn.Module,
-    progress_name: str,
-    progress: int,
-    optimizer: torch.optim.Optimizer | None = None,
-    scheduler: Any | None = None,
-    scaler: Any | None = None,
-    **extra: Any,
+        model: torch.nn.Module,
+        progress_name: str,
+        progress: int,
+        optimizer: torch.optim.Optimizer | None = None,
+        scheduler: Any | None = None,
+        scaler: Any | None = None,
+        **extra: Any,
 ) -> dict:
     """构造统一训练断点；不写入配置或数据哈希。"""
 

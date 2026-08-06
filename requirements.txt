@@ -1,11 +1,8 @@
-# 请先按服务器 CUDA 版本安装相匹配的 torch 与 torchvision。
+# Install the CUDA-compatible torch and torchvision wheels first.
 numpy>=1.26,<3
 Pillow>=10
 PyYAML>=6
-scipy>=1.11
 scikit-learn>=1.4
-timm>=1.0,<2
-monai>=1.4,<1.7
-einops>=0.7
-# 只有读取 DICOM（.dcm/.dicom）时才实际使用；保留依赖便于切换医学数据集。
+
+# Only required when a registered dataset contains DICOM files.
 pydicom>=2.4

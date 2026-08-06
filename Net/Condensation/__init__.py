@@ -1,17 +1,21 @@
-"""标准 IDM、生成参数化和分层 RBF topology 组件。"""
+"""Pixel IDM and cluster-conditioned distribution-matching components."""
 
 from Net.Condensation.idm_official import (
-    IDMConvNet6,
-    build_idm_convnet6,
+    IDMConvNet,
+    build_idm_convnet,
     diff_augment,
     partition_and_expand,
 )
-from Net.Condensation.topology import topology_loss
+from Net.Condensation.cluster_multiform import (
+    cluster_distribution_losses,
+    partition_training_images,
+)
 
 __all__ = [
-    "IDMConvNet6",
-    "build_idm_convnet6",
+    "IDMConvNet",
+    "build_idm_convnet",
     "diff_augment",
     "partition_and_expand",
-    "topology_loss",
+    "cluster_distribution_losses",
+    "partition_training_images",
 ]

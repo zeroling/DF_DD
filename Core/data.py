@@ -1,16 +1,17 @@
 """与具体疾病、目录组织和医学文件格式解耦的数据层。
 
-所有适配器最终只产生 ``SampleRecord``，所有解码器最终只产生 ``[0,1]`` 的
-``float32 [C,H,W]`` 张量。分类网络、VAE 和扩散模型所需的不同归一化由训练阶段
-显式完成，因此数据集更换不会把归一化细节传播到整条管线。
+所有适配器最终只产生 ``SampleRecord``；解码和空间变换先得到 ``[0,1]``
+的 ``float32 [C,H,W]``，Dataset 再应用论文协议指定的通道归一化。
 """
 
 from __future__ import annotations
 
 import csv  # 读取带表头的 CSV 样本清单。
 import json  # 读取 JSON/JSONL 清单。
+import os  # 原子替换自动下载完成的公开数据文件。
 import random  # 分层划分和 DataLoader worker 的 Python 随机源。
 import sys  # Windows 使用单独的 DataLoader worker 安全默认值。
+import urllib.request  # 从 MedMNIST 官方 Zenodo 地址下载 NPZ。
 from dataclasses import dataclass  # 用轻量数据类保存样本索引与数据划分。
 from pathlib import Path  # 统一处理绝对/相对路径和扩展名。
 from typing import Any, Callable, Mapping, Sequence  # 描述可扩展解码器与配置接口。
@@ -473,7 +474,7 @@ def _convert_channels(tensor: torch.Tensor, channels: int) -> torch.Tensor:
     # 已满足目标时不复制。
     if current == channels:
         return tensor
-    # 单通道医学图复制到 RGB，使 ImageNet 风格分类网络和 VAE 共用 3 通道接口。
+    # 单通道医学图在需要时复制到 RGB。
     if channels == 3 and current == 1:
         return tensor.repeat(3, 1, 1)
     # RGB 转灰度使用标准亮度系数，只取前三个颜色通道。
@@ -558,6 +559,8 @@ class MedicalImageDataset(Dataset):
         channels: int,
         intensity_mode: str,
         percentile_range: Sequence[float],
+        normalization_mean: Sequence[float],
+        normalization_std: Sequence[float],
         augmentation: Mapping[str, Any] | None = None,
     ):
         # 复制记录序列，避免调用方后续原地修改影响 Dataset。
@@ -568,6 +571,12 @@ class MedicalImageDataset(Dataset):
         self.channels = int(channels)
         self.intensity_mode = str(intensity_mode)
         self.percentile_range = tuple(map(float, percentile_range))
+        self.normalization_mean = torch.tensor(
+            list(map(float, normalization_mean)), dtype=torch.float32
+        ).view(-1, 1, 1)
+        self.normalization_std = torch.tensor(
+            list(map(float, normalization_std)), dtype=torch.float32
+        ).view(-1, 1, 1)
         # 空间尺寸/增强单独封装，验证测试传 augmentation=None。
         self.transform = TensorSpatialTransform(size, augmentation)
 
@@ -590,14 +599,153 @@ class MedicalImageDataset(Dataset):
         )
         # 返回字典便于添加 key/path；unpack_batch 会给训练代码统一取 image/label。
         return {
-            # resize/增强最后执行，输出 float32 [C,H,W] 且范围 [0,1]。
-            "image": self.transform(image),
+            # resize/增强在归一化之前执行，输出为论文协议的标准化张量。
+            "image": (
+                self.transform(image) - self.normalization_mean
+            ) / self.normalization_std,
             # 分类损失要求 long 标量标签，DataLoader 会堆叠为 [B]。
             "label": torch.tensor(record.label, dtype=torch.long),
             # key/path 仅用于调试和追踪，不会送入网络。
             "key": record.key,
             "path": str(record.path),
         }
+
+
+class MedMNISTNpzDataset(Dataset):
+    """直接读取 MedMNIST 官方 NPZ 划分，不重新随机切分公开基准。"""
+
+    def __init__(
+        self,
+        images: np.ndarray,
+        labels: np.ndarray,
+        split: str,
+        size: tuple[int, int],
+        channels: int,
+        normalization_mean: Sequence[float],
+        normalization_std: Sequence[float],
+        augmentation: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.images = images
+        self.targets = np.asarray(labels).reshape(-1).astype(np.int64).tolist()
+        self.split = str(split)
+        self.channels = int(channels)
+        self.normalization_mean = torch.tensor(
+            list(map(float, normalization_mean)), dtype=torch.float32
+        ).view(-1, 1, 1)
+        self.normalization_std = torch.tensor(
+            list(map(float, normalization_std)), dtype=torch.float32
+        ).view(-1, 1, 1)
+        self.transform = TensorSpatialTransform(size, augmentation)
+        if len(self.images) != len(self.targets):
+            raise ValueError(
+                f"MedMNIST {self.split} 图像/标签数量不一致："
+                f"{len(self.images)} != {len(self.targets)}"
+            )
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        normalized_index = int(index)
+        image = torch.from_numpy(
+            np.array(self.images[normalized_index], copy=True)
+        )
+        image = _convert_channels(_to_chw(image), self.channels)
+        if image.dtype != torch.float32:
+            image = image.float()
+        image = image.div(255.0).clamp_(0.0, 1.0)
+        return {
+            "image": (
+                self.transform(image) - self.normalization_mean
+            ) / self.normalization_std,
+            "label": torch.tensor(
+                self.targets[normalized_index], dtype=torch.long
+            ),
+            "key": f"medmnist:{self.split}:{normalized_index}",
+        }
+
+
+def _ensure_medmnist_npz(
+    config: Mapping[str, Any], root: Path
+) -> Path:
+    """缺失时从配置的官方地址原子下载 PathMNIST NPZ。"""
+
+    settings = config["data"].get("medmnist", {})
+    path = root / str(settings.get("file", "pathmnist.npz"))
+    if path.is_file():
+        return path
+    url = str(settings.get("url", "")).strip()
+    if not url:
+        raise FileNotFoundError(
+            f"MedMNIST 数据不存在且未配置下载地址：{path}"
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".download")
+    try:
+        urllib.request.urlretrieve(url, temporary)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return path
+
+
+def _build_medmnist_bundle(
+    config: Mapping[str, Any],
+    train_augmentation: Mapping[str, Any] | None,
+    root: Path,
+) -> DataBundle:
+    data_config = config["data"]
+    settings = data_config.get("medmnist", {})
+    path = _ensure_medmnist_npz(config, root)
+    class_names = [str(value) for value in data_config["class_names"]]
+    common = {
+        "size": image_size(config),
+        "channels": int(data_config["image"].get("channels", 3)),
+        "normalization_mean": data_config["image"]["normalization"]["mean"],
+        "normalization_std": data_config["image"]["normalization"]["std"],
+    }
+    augmentation = (
+        data_config.get("augmentation", {})
+        if train_augmentation is None
+        else train_augmentation
+    )
+    with np.load(path, allow_pickle=False) as payload:
+        arrays = {
+            split: (
+                np.array(payload[f"{split}_images"], copy=True),
+                np.array(payload[f"{split}_labels"], copy=True),
+            )
+            for split in ("train", "val", "test")
+        }
+    datasets = {
+        split: MedMNISTNpzDataset(
+            images,
+            labels,
+            split,
+            augmentation=augmentation if split == "train" else None,
+            **common,
+        )
+        for split, (images, labels) in arrays.items()
+    }
+    expected_counts = settings.get("expected_counts", {})
+    for split, dataset in datasets.items():
+        expected = expected_counts.get(split)
+        if expected is not None and len(dataset) != int(expected):
+            raise ValueError(
+                f"PathMNIST {split} 数量应为 {expected}，实际 {len(dataset)}"
+            )
+        present = set(map(int, dataset.targets))
+        missing = sorted(set(range(len(class_names))) - present)
+        if missing:
+            raise ValueError(f"PathMNIST {split} 缺少类别：{missing}")
+    return DataBundle(
+        datasets["train"],
+        datasets["val"],
+        datasets["test"],
+        class_names,
+        {name: index for index, name in enumerate(class_names)},
+    )
 
 
 def _verify_records(records: Sequence[SampleRecord], split: str, num_classes: int) -> None:
@@ -631,6 +779,8 @@ def build_data_bundle(
     root = resolve_path(config, data_config["root"])
     # class_names 可固定类别顺序；folder 未配置时从训练目录发现。
     configured_names = data_config.get("class_names")
+    if adapter == "medmnist_npz":
+        return _build_medmnist_bundle(config, train_augmentation, root)
     if adapter == "folder":
         # 目录结构：root/{train,val,test}/{class}/任意子目录/图像。
         class_names = [str(value) for value in configured_names] if configured_names else _discover_folder_classes(root, str(data_config.get("train_split", "train")))
@@ -646,11 +796,17 @@ def build_data_bundle(
     # 只有验证集允许缺失；此时从训练集按类别分层切出，不触碰测试集。
     if not val_records:
         validation = data_config.get("validation", {})
-        train_records, val_records = _stratified_split(
-            train_records,
-            float(validation.get("ratio", 0.1)),
-            int(validation.get("seed", config["project"].get("seed", 0))),
-        )
+        if str(validation.get("source", "")).lower() == "test":
+            # COVID19-CXR 的公开协议只有固定 8:2 train/test。这里复用
+            # test 作为只读监控集，不从 train 再扣除样本；主流程禁止据此
+            # 早停或选择 synthetic checkpoint。
+            val_records = list(test_records)
+        else:
+            train_records, val_records = _stratified_split(
+                train_records,
+                float(validation.get("ratio", 0.1)),
+                int(validation.get("seed", config["project"].get("seed", 0))),
+            )
     # 构建 Dataset 前统一验证三个划分，错误尽早暴露。
     for split, records in (("train", train_records), ("val", val_records), ("test", test_records)):
         _verify_records(records, split, len(class_names))
@@ -660,6 +816,8 @@ def build_data_bundle(
         "channels": int(data_config["image"].get("channels", 3)),
         "intensity_mode": str(data_config["image"].get("intensity_mode", "auto")),
         "percentile_range": data_config["image"].get("percentile_range", [0.5, 99.5]),
+        "normalization_mean": data_config["image"]["normalization"]["mean"],
+        "normalization_std": data_config["image"]["normalization"]["std"],
     }
     # 默认读取全局增强；扩散等阶段可传入独立配置而不影响分类训练。
     augmentation = data_config.get("augmentation", {}) if train_augmentation is None else train_augmentation
